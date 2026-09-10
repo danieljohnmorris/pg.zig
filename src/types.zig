@@ -931,8 +931,19 @@ fn resultEncodingFor(oid: i32) *const [2]u8 {
             }
         }
     }
-    // default to text encoding
-    return &binary_encoding;
+    // Ask the server for text. The binary wire format is type-specific and
+    // undocumented for types we have no decoder for, so a binary answer is
+    // unusable. Text is the one representation every type has. This matters
+    // for generic clients that run arbitrary SQL against types this library
+    // does not model: Redshift SUPER, GEOMETRY and VARBYTE, user-defined
+    // types, extension types.
+    //
+    // Note the loop above never returns: `@hasField(S, "oid")` is false for
+    // every type in this file, because `oid` is a declaration and these types
+    // carry no fields. So this fallthrough is the whole function today and
+    // the change makes every result column text, not only the unknown ones.
+    // See the tests at the bottom of this file.
+    return &text_encoding;
 }
 
 pub const Encode = struct {
@@ -1587,6 +1598,35 @@ fn compileHaltBindError(comptime T: type) noreturn {
 }
 
 const t = lib.testing;
+test "resultEncodingFor: unknown oid asks for text" {
+    // 999999 is not a real OID, so nothing in this file claims it.
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(999999));
+    // 0 is the "unspecified" OID the server reports for some expressions.
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(0));
+}
+
+test "resultEncodingFor: the oid table above is unreachable, so known oids are text too" {
+    // The `inline for` in resultEncodingFor tests `@hasField(S, "oid")`, but
+    // `oid` is a declaration on these types, not a field, and the types have
+    // no fields at all. `@hasField` is therefore false for every one of them
+    // and the loop can never return: every OID reaches the fallthrough. This
+    // test pins that, so it fails if the loop is ever repaired with
+    // `@hasDecl`, at which point these expectations need revisiting.
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(Int32.oid.decimal)); // int4 = 23
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(Int64.oid.decimal)); // int8 = 20
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(Bool.oid.decimal)); // bool = 16
+    try t.expectSlice(u8, &text_encoding, resultEncodingFor(Numeric.oid.decimal)); // numeric = 1700
+}
+
+test "resultEncoding: writes one text format code per column" {
+    var buf = try buffer.Buffer.init(t.allocator, 64);
+    defer buf.deinit();
+
+    var oids = [_]i32{ Int32.oid.decimal, 999999, 25 };
+    try resultEncoding(&oids, &buf);
+    try t.expectSlice(u8, &.{ 0, 3, 0, 0, 0, 0, 0, 0 }, buf.string());
+}
+
 test "UUID: toString" {
     try t.expectError(error.InvalidUUID, UUID.toString(&.{ 73, 190, 142, 9, 170, 250, 176, 16, 73, 21 }));
 
