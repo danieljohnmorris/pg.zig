@@ -43,8 +43,19 @@ pub fn build(b: *std.Build) !void {
 
     if (openssl) {
         if (openssl_lib_path) |p| pg_module.addLibraryPath(p);
-        pg_module.linkSystemLibrary("crypto", .{});
-        pg_module.linkSystemLibrary(openssl_lib_name orelse "ssl", .{});
+        // pkg-config off, static preferred. openssl.pc reports an absolute
+        // Cellar or prefix path, which a macOS build cannot use: the SDK
+        // sysroot is prepended to every -L, so the directory resolves under
+        // the .sdk and is not there. It also drags in the shared libraries,
+        // which a redistributable app cannot link against. With pkg-config
+        // out of the way the only search path is openssl_lib_path, and the
+        // static archives in it win.
+        const link_opts: std.Build.Module.LinkSystemLibraryOptions = .{
+            .use_pkg_config = .no,
+            .preferred_link_mode = .static,
+        };
+        pg_module.linkSystemLibrary("crypto", link_opts);
+        pg_module.linkSystemLibrary(openssl_lib_name orelse "ssl", link_opts);
         pg_module.link_libc = true;
     }
 
